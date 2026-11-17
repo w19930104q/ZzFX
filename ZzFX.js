@@ -57,9 +57,10 @@ export const ZZFX =
     
     // sample rate for audio
     sampleRate: 44100,
-    
-    // create shared audio context
-    audioContext: new AudioContext,
+
+    // shared audio context, created lazily on first play so the module
+    // can also be imported where no AudioContext exists (tests, SSR)
+    audioContext: null,
 
     // play a sound from zzfx paramerters
     play: function(...parameters)
@@ -69,13 +70,16 @@ export const ZZFX =
     },
 
     // play an array of samples
-    playSamples: function(sampleChannels, volumeScale=1, rate=1, pan=0, loop=false)
+    playSamples: function(sampleChannels, volumeScale=1, rate=1, pan=0, loop=false, loopStart=0, loopEnd=0)
     {
+        // create shared audio context on first use
+        const audioContext = this.audioContext || (this.audioContext = new AudioContext);
+
         // create buffer and source
         const channelCount = sampleChannels.length;
         const sampleLength = sampleChannels[0].length;
-        const buffer = this.audioContext.createBuffer(channelCount, sampleLength, this.sampleRate);
-        const source = this.audioContext.createBufferSource();
+        const buffer = audioContext.createBuffer(channelCount, sampleLength, this.sampleRate);
+        const source = audioContext.createBufferSource();
 
         // copy samples to buffer and setup source
         sampleChannels.forEach((c,i)=> buffer.getChannelData(i).set(c));
@@ -83,14 +87,22 @@ export const ZZFX =
         source.playbackRate.value = rate;
         source.loop = loop;
 
+        // loop boundaries in seconds, default is the whole buffer
+        if (loop)
+        {
+            source.loopStart = loopStart;
+            if (loopEnd > loopStart)
+                source.loopEnd = loopEnd;
+        }
+
         // create and connect gain node
-        const gainNode = this.audioContext.createGain();
+        const gainNode = audioContext.createGain();
         gainNode.gain.value = this.volume*volumeScale;
-        gainNode.connect(this.audioContext.destination);
+        gainNode.connect(audioContext.destination);
         source.gainNode = gainNode; // expose so callers can adjust or fade
 
         // connect source to stereo panner and gain
-        const pannerNode = new StereoPannerNode(this.audioContext, {'pan':pan});
+        const pannerNode = new StereoPannerNode(audioContext, {'pan':pan});
         source.connect(pannerNode).connect(gainNode);
         source.start();
 
@@ -98,10 +110,76 @@ export const ZZFX =
         return source;
     },
 
+    // play a sound rendered by renderSamples, honoring its loop boundaries
+    playRendered: function(rendered, volumeScale=1, rate=1, pan=0, loop=false)
+    {
+        return this.playSamples([rendered.samples], volumeScale, rate, pan, loop,
+            rendered.loopStart / rendered.sampleRate,
+            rendered.loopEnd / rendered.sampleRate);
+    },
+
     // build an array of samples
-    buildSamples: function
+    // uses Math.random for the randomness parameter, so live playback
+    // keeps a bit of variation; use renderSamples for repeatable output
+    buildSamples: function(...parameters)
+    {
+        return this.generateSamples(Math.random, this.sampleRate, ...parameters);
+    },
+
+    // deterministic render contract: the same parameters, seed, and sample
+    // rate always produce the exact same samples, render after render
+    // - parameters: array of zzfx parameters (same as buildSamples)
+    // - contract.seed: seed for the randomness parameter (default 1)
+    // - contract.sampleRate: render sample rate (default ZZFX.sampleRate)
+    // - contract.loopStart/loopEnd: loop boundaries in samples, clamped to
+    //   the buffer (default is the whole buffer)
+    // returns {samples, sampleCount, sampleRate, seed, loopStart, loopEnd}
+    renderSamples: function(parameters, contract={})
+    {
+        const seed = contract.seed != undefined ? contract.seed : 1;
+        const sampleRate = contract.sampleRate || this.sampleRate;
+        const samples = this.generateSamples(
+            this.seededRandom(seed), sampleRate, ...parameters);
+        const sampleCount = samples.length;
+
+        // explicit loop boundaries in samples, clamped to the buffer
+        const clamp = v => Math.min(Math.max(v|0, 0), sampleCount);
+        const loopStart = clamp(contract.loopStart || 0);
+        const loopEnd = contract.loopEnd != undefined ?
+            clamp(contract.loopEnd) : sampleCount;
+        if (loopStart >= loopEnd)
+            throw new Error('Invalid loop boundaries: ' +
+                loopStart + ' >= ' + loopEnd);
+
+        return {
+            samples,      // Float32Array of exactly sampleCount samples
+            sampleCount,  // explicit render length
+            sampleRate,   // sample rate the sound was rendered at
+            seed,         // seed used for the randomness parameter
+            loopStart,    // loop boundary, first sample of the loop
+            loopEnd,      // loop boundary, one past the last sample
+        };
+    },
+
+    // deterministic seeded random generator (mulberry32)
+    seededRandom: function(seed)
+    {
+        let a = seed|0;
+        return function()
+        {
+            a = a + 0x6D2B79F5 | 0;
+            let t = Math.imul(a ^ a >>> 15, 1 | a);
+            t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+            return ((t ^ t >>> 14) >>> 0) / 4294967296;
+        };
+    },
+
+    // generate an array of samples
+    generateSamples: function
     (
-        volume = 1, 
+        random, // random source for the randomness parameter
+        sampleRate,
+        volume = 1,
         randomness = .05,
         frequency = 220,
         attack = 0,
@@ -125,13 +203,12 @@ export const ZZFX =
     )
     {
         // init parameters
-        let sampleRate = this.sampleRate,
-            PI2 = Math.PI*2, 
-            abs = Math.abs, 
-            sign = v => v<0?-1:1, 
+        let PI2 = Math.PI*2,
+            abs = Math.abs,
+            sign = v => v<0?-1:1,
             startSlide = slide *= 500 * PI2 / sampleRate / sampleRate,
-            startFrequency = frequency *= 
-                (1 + randomness*2*Math.random() - randomness) * PI2 / sampleRate,
+            startFrequency = frequency *=
+                (1 + randomness*2*random() - randomness) * PI2 / sampleRate,
             modOffset = 0, // modulation offset  
             repeat = 0,    // repeat offset
             crush = 0,     // bit crush offset

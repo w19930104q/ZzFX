@@ -1699,8 +1699,11 @@ function BuildWaveFile()
 {
     const sound = BuildSoundFromSettings();
     const wavVolume = .5; // export at half scale to leave headroom
-    const samples = ZZFX.buildSamples(...SoundToArray(sound)).map(s=>s*wavVolume);
-    const url = buildWavURL([samples], ZZFX.sampleRate);
+    // render through the deterministic contract so the same sound
+    // always exports the exact same wav file
+    const rendered = ZZFX.renderSamples(SoundToArray(sound));
+    const samples = rendered.samples.map(s=>s*wavVolume);
+    const url = buildWavURL([samples], rendered.sampleRate);
     const filename = (sound.name.trim() || 'zzfx') + '.wav';
     return {url, filename};
 }

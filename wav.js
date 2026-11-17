@@ -1,76 +1,53 @@
 // wav.js by Frank Force - https://github.com/KilledByAPixel/ZzFX
 
-export function buildWavURL(sampleChannels, sampleRate = 44100)
+// encode sample channels to a 16-bit PCM wav file, returns a Uint8Array
+// pure function with no browser dependencies, safe to use anywhere
+export function buildWavData(sampleChannels, sampleRate = 44100)
 {
     const channelCount = sampleChannels.length;
     const sampleCount = sampleChannels[0].length;
-    const length = channelCount * sampleCount;
-    const headerSize = 23;
-    const buffer = new Int16Array(length + headerSize);
     console.assert(channelCount && sampleCount, 'No channels or samples found!');
 
-    {    
-        // wave header adapted from https://gist.github.com/asanoboy/3979747
+    // standard 44 byte PCM wav header
+    const bytesPerSample = 2; // 16-bit PCM
+    const blockAlign = channelCount * bytesPerSample;
+    const dataSize = sampleCount * blockAlign;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+    const text = (offset, s) =>
+        s.split('').forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
 
-        // RIFF (ascii)
-        buffer[ 0] = 0x4952; // RF
-        buffer[ 1] = 0x4646; // FF
+    text( 0, 'RIFF');
+    view.setUint32( 4, 36 + dataSize, true);       // riff size
+    text( 8, 'WAVE');
+    text(12, 'fmt ');
+    view.setUint32(16, 16, true);                  // format chunk size
+    view.setUint16(20, 1, true);                   // format tag: PCM
+    view.setUint16(22, channelCount, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true); // bytes per second
+    view.setUint16(32, blockAlign, true);          // bytes per sample frame
+    view.setUint16(34, 8 * bytesPerSample, true);  // bits per sample
+    text(36, 'data');
+    view.setUint32(40, dataSize, true);
 
-        // RIFF size
-        const dataSize = 2*length;
-        const riffSize = dataSize + headerSize*2 - 8;
-        buffer[ 2] = riffSize & 0x0000ffff;
-        buffer[ 3] = (riffSize & 0xffff0000) >> 16;
-
-        // WAVE (ascii)
-        buffer[ 4] = 0x4157; // WA
-        buffer[ 5] = 0x4556; // VE
-
-        // fmt (ascii)
-        buffer[ 6] = 0x6d66; // fm
-        buffer[ 7] = 0x2074; // t
-
-        // format chunk size: 18
-        buffer[ 8] = 0x0012; 
-        buffer[ 9] = 0x0000;
-
-        // format tag: 1 (PCM format)
-        buffer[10] = 0x0001;
-
-        // channel count
-        buffer[11] = channelCount;
-
-        // samples per second
-        buffer[12] = sampleRate & 0x0000ffff;
-        buffer[13] = (sampleRate & 0xffff0000) >> 16;
-
-        // bytes per second
-        buffer[14] = (2*channelCount*sampleRate) & 0x0000ffff;
-        buffer[15] = ((2*channelCount*sampleRate) & 0xffff0000) >> 16;
-
-        // sample size
-        buffer[16] = 0x0004; // bytes per sample: 4
-        buffer[17] = 0x0010; // bit per sample: 16
-        buffer[18] = 0x0000; // padding
-
-        // DATA (ascii)
-        buffer[19] = 0x6164; // DA
-        buffer[20] = 0x6174; // TA
-
-        // data size
-        buffer[21] = dataSize & 0x0000ffff;
-        buffer[22] = (dataSize & 0xffff0000) >> 16;
-    }
-
-    // copy samples to buffer
-    for (let j = channelCount; j--;)
-    for (let i = sampleCount; i--;)
+    // copy every sample to the buffer, clamped so nothing wraps or drops
+    let offset = 44;
+    for (let i = 0; i < sampleCount; ++i)
+    for (let j = 0; j < channelCount; ++j)
     {
-        const s = sampleChannels[j][i];
-        buffer[i*channelCount + j + headerSize] = s<1 ? (s * (1<<15) | 0) : (1<<15) - 1;
+        const s = Math.max(-1, Math.min(1, sampleChannels[j][i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        offset += bytesPerSample;
     }
 
-    // return the url
-    const blob = new Blob([buffer], {type:'audio/wav'});
+    return new Uint8Array(buffer);
+}
+
+// build a browser object url for the wav file
+export function buildWavURL(sampleChannels, sampleRate = 44100)
+{
+    const blob = new Blob([buildWavData(sampleChannels, sampleRate)],
+        {type:'audio/wav'});
     return URL.createObjectURL(blob);
 }
